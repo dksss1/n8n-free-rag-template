@@ -1,0 +1,232 @@
+{
+  "name": "Pinecone Search Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pinecone-search",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "874e7434-1aa3-4063-8f00-d09ae51dbd49",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "pinecone-search-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "const inputItem = $input.item;\nconst body = inputItem?.json?.body || inputItem?.json || {};\n\nconst query = body.query || body.body?.query;\n\nif (!query || typeof query !== 'string') {\n  throw new Error(`Query field is required. Received: ${JSON.stringify(body)}`);\n}\n\nreturn [{\n  json: {\n    query: query,\n    namespace: body.namespace || 'default'\n  }\n}];"
+      },
+      "id": "f5f27926-15f3-4ba9-b8cf-835caef015d1",
+      "name": "Process Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-large",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n   \"inputs\": \"query: {{ $json.query }}\",\n   \"options\": { \"wait_for_model\": true }\n}\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "af48ba75-7d42-47ce-a8cd-eee25cb8d103",
+      "name": "Get Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        448,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "KGkcIvh9ke1ieVna",
+          "name": "HF Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://n8n-python-420ar5z.svc.aped-4627-b74a.pinecone.io/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    \"vector\": $json.vector,\n    \"namespace\": $json.namespace,\n    \"topK\": $json.topK || 5, \n    \"includeMetadata\": true,\n    \"includeValues\": false\n  })\n}}\n",
+        "options": {}
+      },
+      "id": "97ede82f-03f1-4cb3-a7ff-811308863560",
+      "name": "Query Pinecone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        880,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "kZhtomjR9Z52vDPQ",
+          "name": "Pinecone"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const matches = $input.item.json.matches || [];\n\nreturn matches.map(match => ({\n  json: {\n    text: match.metadata?.text || '',\n    score: match.score || 0,\n    source: match.metadata?.source || 'unknown',\n    chunk_index: match.metadata?.chunk_index || -1,\n    id: match.id\n  }\n}));"
+      },
+      "id": "e23fcca8-a93b-4e9e-aa24-d900466ec079",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1088,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $input.all().map(item => item.json) }}",
+        "options": {}
+      },
+      "id": "4cb1c386-72a6-425b-971d-e13e46da110d",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1312,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Получаем строку с вектором\nconst embeddingString = $input.item.json.data; // поле из HTTP Request\n\nlet vector;\ntry {\n    vector = JSON.parse(embeddingString);\n} catch (e) {\n    throw new Error(\"Ошибка парсинга вектора. Проверьте HF токен и настройки.\");\n}\n\n// Проверка на всякий случай (иногда HF возвращает массив массивов [[0.1...]])\nif (Array.isArray(vector) && Array.isArray(vector[0])) {\n    vector = vector[0];\n}\n\n// 2. Пробрасываем namespace из начала (или используем дефолтный)\n// Нам нужно найти данные из ноды 'Process Query'\nconst queryData = $('Process Query').item.json;\n\nreturn {\n  json: {\n    vector: vector,\n    namespace: queryData.namespace,\n    topK: 5 // Количество результатов\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        0
+      ],
+      "id": "52c32261-7632-460b-91fe-026b0c9ed58b",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Query": {
+      "main": [
+        [
+          {
+            "node": "Get Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Pinecone": {
+      "main": [
+        [
+          {
+            "node": "Format Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Results": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Query Pinecone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c75c1788-f5fd-434c-8b2f-8878496207fc",
+  "meta": {
+    "instanceId": "21781842c35f1caf1564497036e79fb255e04e24ab81410d4ba7a09089827d19"
+  },
+  "id": "zRmadqPhOcjAJ5KX",
+  "tags": []
+}

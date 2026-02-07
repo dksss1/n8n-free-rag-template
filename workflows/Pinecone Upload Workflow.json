@@ -1,0 +1,294 @@
+{
+  "name": "Pinecone Upload Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pinecone-upload",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6d580bfc-bb4e-46b0-a114-d16b920facc7",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "pinecone-upload-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "const body = $input.item.json.body || $input.item.json;\nconst files = body.files || [];\nconst namespace = body.namespace || 'default';\n\nif (!Array.isArray(files) || files.length === 0) {\n  throw new Error('files array is required. Format: {\"files\": [{\"fileName\": \"test.txt\", \"text\": \"content...\"}], \"namespace\": \"default\"}');\n}\n\nreturn files.map(file => ({\n  json: {\n    fileName: file.fileName || 'unknown.txt',\n    text: file.text || file.content || '',\n    source: (file.fileName || 'unknown').replace('.txt', ''),\n    namespace: namespace\n  }\n}));"
+      },
+      "id": "d9a9c3de-1fde-4405-8a08-85d3f7dc1f59",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// 1. Получаем ВСЕ входящие файлы\nconst allFiles = $input.all(); \nconst allChunks = []; // Сюда сложим чанки от ВСЕХ файлов\n\nconst chunkSize = 600;\nconst overlap = 100;\n\n// 2. Бежим по каждому файлу\nallFiles.forEach(item => {\n    const inputData = item.json;\n    const text = inputData.text;\n    const source = inputData.source || inputData.fileName || 'unknown';\n    const namespace = inputData.namespace || 'default';\n\n    // Пропускаем пустые или битые файлы\n    if (!text || typeof text !== 'string') {\n        return; \n    }\n\n    // 3. Разбиваем конкретный файл на чанки\n    let index = 0;\n    for (let i = 0; i < text.length; i += chunkSize - overlap) {\n        // Условие выхода, чтобы не зациклиться на overlap >= chunkSize\n        if (i > 0 && i >= text.length) break;\n\n        const chunk = text.slice(i, i + chunkSize);\n        \n        if (chunk.trim().length > 0) {\n            allChunks.push({\n                json: {\n                    id: `chunk_${source}_${Date.now()}_${index}`,\n                    text: chunk,\n                    chunk_index: index,\n                    source: source,\n                    namespace: namespace\n                }\n            });\n            index++;\n        }\n        \n        // Защита от бесконечного цикла, если текст меньше chunksize\n        if (chunk.length < chunkSize) {\n             // Но с overlap осторожнее: i увеличивается в for\n        }\n    }\n});\n\n// 4. Возвращаем плоский список всех чанков\nreturn allChunks;\n"
+      },
+      "id": "3e778ee7-b507-44b6-9771-c44607481a9f",
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// 1. Получаем данные из поля 'data' (которое пришло от HTTP Request)\nconst responseData = $input.item.json.data; \n\n// 2. Парсим строку в массив\nlet vector;\ntry {\n    vector = JSON.parse(responseData);\n} catch (e) {\n    throw new Error(\"Ошибка парсинга вектора. Убедитесь, что HTTP Request возвращает строку (Text response). Пришло: \" + responseData);\n}\n\n// 3. Получаем метаданные\nconst chunkData = $('Chunk Text').item.json;\n\nreturn {\n  json: {\n    vectors: [{\n      id: chunkData.id,\n      values: vector, // Теперь здесь будет чистый массив [0.1, 0.2...]\n      metadata: {\n        text: chunkData.text,\n        source: chunkData.source,\n        chunk_index: chunkData.chunk_index\n      }\n    }],\n    namespace: chunkData.namespace\n  }\n};\n"
+      },
+      "id": "e478fc00-9f69-43a7-afbd-9ce6d8e0afcc",
+      "name": "Format for Pinecone",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        -240
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://n8n-python-420ar5z.svc.aped-4627-b74a.pinecone.io/vectors/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    \"vectors\": $json.vectors,\n    \"namespace\": $json.namespace\n  })\n}}\n",
+        "options": {}
+      },
+      "id": "29940ae1-7650-4c48-aeb9-7b847a1dc2f3",
+      "name": "Upsert to Pinecone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1360,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "kZhtomjR9Z52vDPQ",
+          "name": "Pinecone"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Получаем единственный ответ от Pinecone\nconst response = $input.first().json; \nconst upsertedCount = response.upsertedCount || 0;\n\n// Пытаемся узнать, сколько было исходных файлов\nlet totalFiles = 0;\ntry {\n    // Считаем уникальные source (имена файлов) из чанков, если они сохранились\n    // Но проще взять просто длину входа Parse Input\n    totalFiles = $('Parse Input').all().length;\n} catch (e) {\n    totalFiles = 1; \n}\n\nreturn {\n  json: {\n    status: 'success',\n    totalFiles: totalFiles,\n    totalUpserted: upsertedCount,\n    // Так как запрос был один, мы не можем разбить статистику по файлам.\n    // Просто вернем одну общую запись, чтобы Python скрипт не ругался.\n    fileResults: [\n        {\n            fileIndex: 1, \n            upserted: upsertedCount\n        }\n    ]\n  }\n};\n"
+      },
+      "id": "fc20e59f-d55b-4a11-8a0d-aa32d097b42b",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1696,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "00b87565-7182-4f76-bfa0-e2a87e4c3158",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1904,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-large",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    // Берем первый (и единственный) элемент от Aggregate, \n    // заходим в поле .data и делаем map уже по нему\n    \"inputs\": $input.first().json.data.map(item => item.text), \n    \"options\": { \"wait_for_model\": true }\n  })\n}}\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        912,
+        0
+      ],
+      "id": "e77801ef-9263-486a-98f9-7f35093b9a0d",
+      "name": "HTTP Request",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "KGkcIvh9ke1ieVna",
+          "name": "HF Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        656,
+        0
+      ],
+      "id": "366a2fb0-1c43-4f4a-a600-9db7cfdcc405",
+      "name": "Aggregate"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Получаем массив векторов от Hugging Face\n// HF возвращает массив массивов (каждый вектор - это массив чисел)\n// Проверяем, в каком виде пришел ответ. Обычно это JSON в поле 'data' или сам body\nconst responseItem = $input.first();\nlet vectors = responseItem.json.data || responseItem.json; \n\n// Если пришла строка, парсим\nif (typeof vectors === 'string') {\n    try {\n        vectors = JSON.parse(vectors);\n    } catch (e) {\n        throw new Error(\"Ошибка парсинга ответа HF: \" + vectors);\n    }\n}\n\n// 2. Получаем исходные данные (тексты, ID) из ноды Chunk Text\n// ВАЖНО: Имя ноды ('Chunk Text') должно точно совпадать с вашим!\nconst originalItems = $(\"Chunk Text\").all();\n\n// Проверка на совпадение количества\nif (vectors.length !== originalItems.length) {\n    throw new Error(`Несовпадение количества: отправили ${originalItems.length} текстов, получили ${vectors.length} векторов.`);\n}\n\n// 3. Объединяем их\nreturn originalItems.map((item, index) => {\n  const vector = vectors[index];\n  \n  // Возвращаем структуру, готовую для Pinecone\n  return {\n    json: {\n      vectors: [{\n        id: item.json.id,\n        values: vector,\n        metadata: {\n          text: item.json.text,\n          source: item.json.source,\n          chunk_index: item.json.chunk_index\n        }\n      }],\n      namespace: item.json.namespace || \"default\"\n    }\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "c4e13efc-3208-45aa-bf54-12846274d1b0",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Chunk Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Text": {
+      "main": [
+        [
+          {
+            "node": "Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Pinecone": {
+      "main": [
+        []
+      ]
+    },
+    "Upsert to Pinecone": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Upsert to Pinecone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "678016fa-720f-4c2a-92a9-c05f23f4a5ed",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "21781842c35f1caf1564497036e79fb255e04e24ab81410d4ba7a09089827d19"
+  },
+  "id": "RTFerqlCROGMNKHy",
+  "tags": []
+}
